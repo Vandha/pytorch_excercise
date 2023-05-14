@@ -1,15 +1,15 @@
 {
-    "name": "Mnist_LeNet",
+    "name": "notMNIST_LeNet",
     "n_gpu": 1,
 
     "arch": {
-        "type": "MnistModel",
+        "type": "MLPModel",
         "args": {}
     },
     "data_loader": {
-        "type": "MnistDataLoader",
+        "type": "notMnistDataLoader",
         "args":{
-            "data_dir": "data/",
+            "data_dir": "/Users/vpw/Projects/backend.ai/pytorch-template/data/notMNIST_small/",
             "batch_size": 128,
             "shuffle": true,
             "validation_split": 0.1,
@@ -19,9 +19,8 @@
     "optimizer": {
         "type": "Adam",
         "args":{
-            "lr": 0.001,
-            "weight_decay": 0,
-            "amsgrad": true
+            "lr": 0.0001,
+            "weight_decay": 0.0005
         }
     },
     "loss": "nll_loss",

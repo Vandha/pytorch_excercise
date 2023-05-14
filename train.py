@@ -52,6 +52,7 @@ def main(config):
                       lr_scheduler=lr_scheduler)
 
     trainer.train()
+    # trainer.run_experiment()
 
 
 if __name__ == '__main__':

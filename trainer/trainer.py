@@ -3,6 +3,8 @@ import torch
 from torchvision.utils import make_grid
 from base import BaseTrainer
 from utils import inf_loop, MetricTracker
+import itertools
+import copy
 
 
 class Trainer(BaseTrainer):
@@ -54,7 +56,7 @@ class Trainer(BaseTrainer):
                 self.train_metrics.update(met.__name__, met(output, target))
 
             if batch_idx % self.log_step == 0:
-                self.logger.debug('Train Epoch: {} {} Loss: {:.6f}'.format(
+                self.logger.debug('Train Epochs: {} {} Loss: {:.6f}'.format(
                     epoch,
                     self._progress(batch_idx),
                     loss.item()))
@@ -71,6 +73,60 @@ class Trainer(BaseTrainer):
         if self.lr_scheduler is not None:
             self.lr_scheduler.step()
         return log
+    
+    def run_experiment(self):
+        best_acc = 0.0
+        best_state_dict = None
+        for optimizer_cls in [torch.optim.SGD, torch.optim.Adam, torch.optim.Adagrad]:
+            for lr in [0.01, 0.001, 0.0001]:
+                optimizer = optimizer_cls(self.model.parameters(), lr=lr)
+                for weight_decay in [0.0, 0.001, 0.01]:
+                    for momentum in [0.0, 0.9]:
+                        config = {'optimizer': str(optimizer_cls.__name__), 'lr': lr, 'weight_decay': weight_decay,
+                                'momentum': momentum}
+                        self.set_config(config)
+
+                        # create new optimizer and lr scheduler with current config
+                        self.optimizer = optimizer
+                        self.lr_scheduler = self.get_lr_scheduler()
+
+                        # train the model
+                        for epoch in range(1, self.epochs + 1):
+                            result = self._train_epoch(epoch)
+                            message = 'Epoch: {}/{}. Train set: Average loss: {:.4f}'.format(epoch, self.epochs,
+                                                                                            result['loss'])
+                            for metric in self.metric_ftns:
+                                message += ' {}: {:.4f}'.format(metric.__name__, result[metric.__name__])
+                            self.logger.info(message)
+
+                            if self.do_validation:
+                                val_result = self._valid_epoch(epoch)
+                                message = 'Epoch: {}/{}. Validation set: Average loss: {:.4f}'.format(epoch, self.epochs,
+                                                                                                        val_result['loss'])
+                                for metric in self.metric_ftns:
+                                    message += ' {}: {:.4f}'.format(metric.__name__, val_result[metric.__name__])
+                                self.logger.info(message)
+
+                            # update tensorboard and learning rate
+                            if self.lr_scheduler is not None:
+                                lr = self.lr_scheduler.get_lr()[0]
+                                self.writer.add_scalar('learning_rate', lr, epoch)
+                                self.logger.debug('Learning rate: {}'.format(lr))
+                            self.writer.set_step(epoch)
+
+                        # check if current hyperparameters gave best accuracy
+                        if self.do_validation:
+                            acc = val_result['accuracy']
+                            if acc > best_acc:
+                                best_acc = acc
+                                best_state_dict = self.model.state_dict()
+                                self.logger.info('Found new best accuracy: {:.4f}'.format(best_acc))
+                                self.logger.info('Saving state dict to {}'.format(self.config['checkpoint']))
+                                torch.save(best_state_dict, self.config['checkpoint'])
+
+        self.logger.info('Best accuracy: {:.4f}'.format(best_acc))
+        self.model.load_state_dict(best_state_dict)
+        return self.model
 
     def _valid_epoch(self, epoch):
         """
@@ -108,3 +164,50 @@ class Trainer(BaseTrainer):
             current = batch_idx
             total = self.len_epoch
         return base.format(current, total, 100.0 * current / total)
+
+
+class ExperimentTrainer(Trainer):
+    """
+    Trainer class for conducting hyperparameter experiments
+    """
+    def __init__(self, model, criterion, metric_ftns, optimizer, config, device, data_loader,
+                 valid_data_loader=None, lr_scheduler=None, len_epoch=None):
+        super().__init__(model, criterion, metric_ftns, optimizer, config, device, data_loader,
+                         valid_data_loader, lr_scheduler, len_epoch)
+        self.hyperparams = config['hyperparams'] 
+        self.results = {} 
+    def run_experiment(self):
+        """
+        Run the hyperparameter experiment
+        """
+        for hp in self.hyperparams.keys():
+            values = self.hyperparams[hp]
+            print(f'Testing hyperparameter {hp} with values: {values}')
+            results = []
+            for combination in itertools.product(*values):
+                params = copy.deepcopy(self.config) 
+                for i, val in enumerate(combination):
+                    params[hp][i] = val 
+                self.config = params 
+                result = self._train() 
+                results.append((combination, result)) 
+            self.results[hp] = results 
+
+    def _train(self):
+        """
+        Train the model with the current configuration and return the validation accuracy
+        """
+        best_val_acc = 0.0
+        for epoch in range(1, self.epochs + 1):
+            train_log = self._train_epoch(epoch)
+            val_log = self._valid_epoch(epoch)
+
+            self.logger.info(f'Train Epoch: {epoch} {train_log}')
+            self.logger.info(f'Validation Epoch: {epoch} {val_log}')
+
+            val_acc = val_log['accuracy']
+            if val_acc > best_val_acc:
+                self._save_checkpoint(epoch, save_best=True)
+                best_val_acc = val_acc
+
+        return best_val_acc
